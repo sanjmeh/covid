@@ -20,14 +20,6 @@ load("keys.data")
 #helper
 `%notin%` <- function(lhs, rhs) !(lhs %in% rhs)
 
-# input an address vector to get a address vector with + signs in between
-prep_addr_RT <- function(addstr,bangalore=T){
-  str2 <- addstr %>% str_replace_all("[#,&]"," ") %>% 
-    str_trim %>% str_replace_all("\\s+","+") %>% 
-    {ifelse(grepl("RT|JC|chamund|J\\+C|R\\+T|Dinnur", .,ig=T), .,paste(.,"RT+Nagar",sep="+"))} %>% 
-    {ifelse(grepl("Bangalore|Bengaluru", .,ig=T), paste(.,"Karnataka",sep="+"),paste(.,"Bangalore+Karnataka",sep="+"))}
-  str2 %>% strsplit("\\s+") %>% map(paste,collapse="+") %>% unlist
-}
 
 # input an address vector to get a address vector with + signs in between
 prep_addr <- function(addstr,bangalore=T){
@@ -448,4 +440,55 @@ fire_geocode <- function(addr_str,gmast=geomaster){
   new_addr <- setdiff(addr_str,gmast$gaddr)
   new_geo <- geocode(new_addr) %>% cbind(data.table(gaddr=new_addr),.)
   rbind(ex_geo,new_geo)
+}
+
+# Read the latest EIDs of BAF volunteers
+read_eid <- function(gsheet=volsh){
+  eid <- read_sheet(gsheet,sheet = 2,range = "A:D") %>% setDT
+  setnames(eid,qc(bafid,vol_fulid,volid,bafno))
+  eid[,volid:=as.character(volid)]
+}
+
+# Download from latest paperform google sheet. Switch off (download=F) to just read a copy
+read_paperform <- function(gsheet=paperformsheet,download=T){
+  if(download) drive_download(file = paperformsheet,"paperform.csv",type = "csv",overwrite = T)
+  fread("paperform.csv")
+}
+
+proc_paperform <- function(dt){
+  setnames(dt[,c(1:22)],qc(subm,cqsid,attby,mode,ttype,hqid,breached,reason,fir,sympt,distt,zone_taluk,ward_panch,
+                 comments,hq_addr_chg,new_addr,mob_chg,new_mob,distt_chg,zone_chg,ward_chg,photo_rem))
+  dt[,hqid_upper:=toupper(hqid)]
+  dt[,date_submitted:=parse_date_time(subm,orders = c("dmy","ymd HMS")) %>% as.Date()]
+  dt[,cqcode:=str_sub(cqsid,-5)]
+}
+
+# this is the master merging function, of 4 databases: paperform, baf membership, covid cases, citizen volunteers, electronic ids to volunteers
+# cases must have columns: bbmpzone; member must gave columns clust_name, cluster, 
+merge_databases <- function(paperdt, member=bafmembs,cases=cases_10_aug,volntr=vol2,eid=eid_old,from=20200806,html=T){
+  cqid <- eid[paperdt,on=.(volid=cqcode),nomatch=0]
+  case_cnt <- cases[,.(bafno,qwid)][,.N,by=bafno]
+  cq_u <- cqid[,.(volid,bafno)] %>% unique
+  cq_u[,.N,bafno] -> cq_u_cnt
+  names(cq_u_cnt) <- qc(bafno,Active)
+  volcounts <- volntr[,.N,by=bafno]
+  setnames(volcounts,qc(bafno,volnts))
+  zonedt <- cases[,.(bafno,bbmpzone)] %>% unique
+  zonedt <- zonedt[,.(bbmpzone=first(bbmpzone)),by=bafno] # select one bbmpzone, since many times same baf appt is mapped to a different bbmpzone
+  x1 <- zonedt[cq_u_cnt,on="bafno"
+         ][volcounts,on="bafno"
+           ][case_cnt,on="bafno"
+             ][member,on="bafno"
+               ][cqid,on=.(bafno)][date_submitted>=ymd(from)
+                                   ][,dat_rev:=fct_rev(format(date_submitted,"%b %d"))
+                                     ][,bbmp_master:=as.character(N)] %>% 
+  
+    dcast(bafno + appt_baf + clust_name + ward_name + bbmpzone + volnts + Active + bbmp_master  ~ dat_rev,fill=NA) %>% 
+    adorn_totals(where = c("row","col"),,,,contains("Aug")) %>% 
+    {
+      if(html==T)
+        addHtmlTableStyle(.,align="llllr",col.columns= c(rep("none", 8),rep("#F0F0F0",25))) %>%  
+        htmlTable(rnames=F,cgroup=c("","VOLUNTEERS","CASES","DATES","TOTAL"),n.cgroup=c(5,2,1,9,1),total = T) # make these numbers more robust by using total days columns
+      else .
+    }
 }
